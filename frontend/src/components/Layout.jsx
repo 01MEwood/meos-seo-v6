@@ -1,4 +1,4 @@
-import { NavLink, useNavigate } from 'react-router-dom';
+import { NavLink, useNavigate, Outlet } from 'react-router-dom';
 import { useAuth } from '../hooks/useAuth';
 import { useState, useEffect } from 'react';
 import { api } from '../utils/api';
@@ -17,7 +17,7 @@ const NAV_ITEMS = [
   { path: '/users', label: 'Nutzer', icon: '♟', roles: ['ADMIN'] },
 ];
 
-export default function Layout({ children }) {
+export default function Layout() {
   const { user, logout } = useAuth();
   const navigate = useNavigate();
   const [alertCount, setAlertCount] = useState(0);
@@ -41,9 +41,7 @@ export default function Layout({ children }) {
 
   return (
     <div className="flex h-screen">
-      {/* Sidebar */}
       <aside className={`${sidebarOpen ? 'w-56' : 'w-16'} bg-white border-r border-gray-200 flex flex-col transition-all duration-200`}>
-        {/* Logo */}
         <div className="p-4 border-b border-gray-200">
           <div className="flex items-center gap-2 cursor-pointer" onClick={() => setSidebarOpen(!sidebarOpen)}>
             <div className="w-8 h-8 rounded-lg bg-[#EE7E00] flex items-center justify-center text-white font-bold text-sm">M</div>
@@ -51,7 +49,6 @@ export default function Layout({ children }) {
           </div>
         </div>
 
-        {/* Navigation */}
         <nav className="flex-1 py-2 overflow-y-auto">
           {visibleItems.map((item, i) => {
             if (item.type === 'divider') {
@@ -84,7 +81,6 @@ export default function Layout({ children }) {
           })}
         </nav>
 
-        {/* User */}
         <div className="p-3 border-t border-gray-200">
           {sidebarOpen ? (
             <div className="flex items-center gap-2">
@@ -105,9 +101,8 @@ export default function Layout({ children }) {
         </div>
       </aside>
 
-      {/* Main Content */}
-      <main className="flex-1 overflow-y-auto p-6">
-        {children}
+      <main className="flex-1 overflow-y-auto p-6 bg-[#f6f8f5]">
+        <Outlet />
       </main>
     </div>
   );
