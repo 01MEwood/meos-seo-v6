@@ -1,0 +1,81 @@
+# ============================================================
+# MEOS:SEO v6.0 — Production Deployment (Hostinger VPS)
+# Deployment-Law: Docker Hub (memario) → VPS
+# ============================================================
+
+services:
+  db:
+    image: postgres:16-alpine
+    restart: always
+    environment:
+      POSTGRES_DB: meos_seo_v6
+      POSTGRES_USER: meos
+      POSTGRES_PASSWORD: ${DB_PASSWORD}
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U meos"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    networks:
+      - meos
+
+  redis:
+    image: redis:7-alpine
+    restart: always
+    command: redis-server --appendonly yes --maxmemory 256mb --maxmemory-policy allkeys-lru
+    volumes:
+      - redisdata:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 3s
+      retries: 5
+    networks:
+      - meos
+
+  backend:
+    image: memario/meos-seo-v6-backend:latest
+    restart: always
+    environment:
+      NODE_ENV: production
+      PORT: 4000
+      DATABASE_URL: postgresql://meos:${DB_PASSWORD}@db:5432/meos_seo_v6
+      REDIS_URL: redis://redis:6379
+      JWT_SECRET: ${JWT_SECRET}
+      FRONTEND_URL: https://seo.meosapp.de
+      OPENAI_API_KEY: ${OPENAI_API_KEY}
+      DATAFORSEO_LOGIN: ${DATAFORSEO_LOGIN}
+      DATAFORSEO_PASSWORD: ${DATAFORSEO_PASSWORD}
+      WP_URL: https://schreinerhelden.de
+      WP_USER: ${WP_USER}
+      WP_APP_PASSWORD: ${WP_APP_PASSWORD}
+      WP_TEMPLATE_ID: "9741"
+      ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY}
+      SMTP_HOST: smtp.ionos.de
+      SMTP_PORT: "587"
+      SMTP_USER: ${SMTP_USER}
+      SMTP_PASS: ${SMTP_PASS}
+      ALERT_EMAIL_TO: melanie@schreinerhelden.de
+    depends_on:
+      db:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    networks:
+      - meos
+
+  frontend:
+    image: memario/meos-seo-v6-frontend:latest
+    restart: always
+    networks:
+      - meos
+
+volumes:
+  pgdata:
+  redisdata:
+
+networks:
+  meos:
+    driver: bridge

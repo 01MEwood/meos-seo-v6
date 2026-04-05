@@ -1,0 +1,425 @@
+// ============================================================
+// MEOS:SEO v6.0 — Prisma Schema
+// Schreinerhelden unified SEO/AEO/GEO platform
+// ============================================================
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+// ============================================================
+// 1. NUTZERVERWALTUNG
+// ============================================================
+
+enum UserRole {
+  ADMIN       // Mario — alles inkl. Skills + User-Mgmt
+  POWERUSER   // Melanie — Content, Publishing, Agent, Tracker
+  REDAKTEUR   // Externe — Entwürfe, read-only Dashboard
+}
+
+model User {
+  id            String    @id @default(uuid())
+  email         String    @unique
+  passwordHash  String
+  name          String
+  role          UserRole  @default(REDAKTEUR)
+  isActive      Boolean   @default(true)
+  lastLoginAt   DateTime?
+  createdAt     DateTime  @default(now())
+  updatedAt     DateTime  @updatedAt
+
+  // Relationen
+  skillsCreated   Skill[]        @relation("SkillCreator")
+  skillsEdited    SkillHistory[] @relation("SkillEditor")
+  jobsCreated     Job[]          @relation("JobCreator")
+  contentCreated  Content[]      @relation("ContentCreator")
+  alertsRead      Alert[]        @relation("AlertReader")
+}
+
+// ============================================================
+// 2. SKILLS-ENGINE
+// ============================================================
+
+enum SkillCategory {
+  CONTENT   // landingpage, blog, social
+  SEO       // audit, autofix, schema
+  AEO       // snippet, structured
+  GEO       // tracker, sentiment, competitor
+  GLOBAL    // brand, blacklist, quality, timeline
+}
+
+model Skill {
+  id          String        @id @default(uuid())
+  slug        String        @unique
+  name        String
+  category    SkillCategory
+  description String?
+  config      Json          // Der gesamte Skill-Inhalt
+  isActive    Boolean       @default(true)
+  version     Int           @default(1)
+  dependsOn   String[]      // Slugs anderer Skills die geladen werden
+  createdAt   DateTime      @default(now())
+  updatedAt   DateTime      @updatedAt
+
+  // Ersteller
+  createdById String
+  createdBy   User          @relation("SkillCreator", fields: [createdById], references: [id])
+
+  // Versionsverlauf
+  history     SkillHistory[]
+
+  @@index([category])
+  @@index([isActive])
+}
+
+model SkillHistory {
+  id        String   @id @default(uuid())
+  skillId   String
+  skill     Skill    @relation(fields: [skillId], references: [id], onDelete: Cascade)
+  version   Int
+  config    Json     // Snapshot der alten Config
+  changedBy String
+  editor    User     @relation("SkillEditor", fields: [changedBy], references: [id])
+  changedAt DateTime @default(now())
+  note      String?  // "CTA-Farbe geändert"
+
+  @@index([skillId, version])
+}
+
+// ============================================================
+// 3. CONTENT-PIPELINE
+// ============================================================
+
+enum ContentType {
+  LANDINGPAGE
+  BLOG
+  SOCIAL
+}
+
+enum ContentStatus {
+  DRAFT         // Entwurf — Redakteur kann erstellen
+  REVIEW        // Zur Freigabe — wartet auf Poweruser/Admin
+  APPROVED      // Freigegeben — bereit zum Publishen
+  PUBLISHED     // Live auf WordPress
+  ARCHIVED      // Archiviert / veraltet
+}
+
+model Content {
+  id            String        @id @default(uuid())
+  type          ContentType
+  status        ContentStatus @default(DRAFT)
+  title         String
+  slug          String?       // WordPress-Slug
+  region        String?       // "Stuttgart", "Ludwigsburg", etc.
+  service       String?       // "Dachschrägenschrank", "Einbauschrank"
+  
+  // Generierter Content
+  html          String?       @db.Text
+  metadata      Json?         // SEO-Meta, Schema.org, OpenGraph
+  qualityScore  Float?        // HELDENFORMEL-Score (0-100)
+  
+  // Pipeline-Tracking
+  pipelineState Json?         // Welche Stufe, Zwischenergebnisse
+  skillUsed     String?       // Slug des Skills der zur Generierung verwendet wurde
+  
+  // WordPress-Integration
+  wpPostId      Int?          // WordPress Post-ID nach Push
+  wpUrl         String?       // Live-URL nach Push
+  publishedAt   DateTime?
+  
+  // Audit-Trail
+  createdById   String
+  createdBy     User          @relation("ContentCreator", fields: [createdById], references: [id])
+  createdAt     DateTime      @default(now())
+  updatedAt     DateTime      @updatedAt
+
+  @@index([type, status])
+  @@index([region])
+  @@index([createdAt])
+}
+
+// ============================================================
+// 4. SEO-TRACKING (Keywords + SERP)
+// ============================================================
+
+model Keyword {
+  id          String   @id @default(uuid())
+  keyword     String
+  region      String   // "Stuttgart", "Ludwigsburg", etc.
+  service     String?  // "Dachschrägenschrank", optional
+  isActive    Boolean  @default(true)
+  createdAt   DateTime @default(now())
+
+  positions   KeywordPosition[]
+
+  @@unique([keyword, region])
+  @@index([region])
+}
+
+model KeywordPosition {
+  id          String   @id @default(uuid())
+  keywordId   String
+  keyword     Keyword  @relation(fields: [keywordId], references: [id], onDelete: Cascade)
+  date        DateTime @default(now())
+  position    Int?     // null = nicht gefunden
+  url         String?  // Welche URL rankt
+  
+  // Zusatzdaten
+  searchVolume  Int?
+  difficulty    Float?
+  hasSnippet    Boolean  @default(false)  // Featured Snippet?
+  hasAiOverview Boolean  @default(false)  // AI Overview?
+
+  @@index([keywordId, date])
+  @@index([date])
+}
+
+// ============================================================
+// 5. LLM-TRACKING (GEO)
+// ============================================================
+
+enum LlmModel {
+  CHATGPT
+  CLAUDE
+  PERPLEXITY
+  GEMINI
+  GROK
+}
+
+enum Sentiment {
+  POSITIVE
+  NEUTRAL
+  NEGATIVE
+}
+
+model LlmPrompt {
+  id          String   @id @default(uuid())
+  prompt      String   // "Welcher Schreiner baut Dachschrägenschränke in Stuttgart?"
+  region      String?
+  service     String?
+  isActive    Boolean  @default(true)
+  createdAt   DateTime @default(now())
+
+  results     LlmResult[]
+
+  @@index([isActive])
+}
+
+model LlmResult {
+  id            String    @id @default(uuid())
+  promptId      String
+  prompt        LlmPrompt @relation(fields: [promptId], references: [id], onDelete: Cascade)
+  llm           LlmModel
+  date          DateTime  @default(now())
+  
+  // Ergebnis
+  mentioned     Boolean   @default(false)  // Schreinerhelden erwähnt?
+  sentiment     Sentiment?
+  response      String?   @db.Text         // Vollständige LLM-Antwort
+  position      Int?      // An welcher Stelle erwähnt (1=erste Empfehlung)
+  citedUrl      String?   // Welche URL zitiert wird
+  
+  // Wettbewerb
+  competitorsMentioned Json? // ["Schrankhelden", "deinSchrank.de", ...]
+
+  @@index([promptId, llm, date])
+  @@index([date])
+  @@index([llm])
+}
+
+// ============================================================
+// 6. SEO-AGENT (Audit + Auto-Fix)
+// ============================================================
+
+enum IssueStatus {
+  OPEN
+  FIXING      // Agent arbeitet daran
+  FIXED       // Automatisch repariert
+  IGNORED     // Manuell ignoriert
+  WONT_FIX    // Bewusst nicht behoben
+}
+
+enum IssueSeverity {
+  CRITICAL
+  WARNING
+  INFO
+}
+
+model SeoIssue {
+  id          String        @id @default(uuid())
+  url         String        // Betroffene Seite
+  type        String        // "missing_alt", "broken_link", "schema_error", etc.
+  severity    IssueSeverity
+  status      IssueStatus   @default(OPEN)
+  description String        // "Bild header.jpg hat keinen Alt-Text"
+  details     Json?         // Technische Details
+  
+  // Auto-Fix
+  fixApplied  String?       // Was wurde repariert?
+  fixedAt     DateTime?
+  fixedBy     String?       // "agent" oder userId
+  
+  // Entdeckung
+  detectedAt  DateTime      @default(now())
+  lastSeenAt  DateTime      @default(now())
+
+  @@index([status, severity])
+  @@index([url])
+  @@index([detectedAt])
+}
+
+// ============================================================
+// 7. ZEITSCHIENE (Snapshots + Trends)
+// ============================================================
+
+enum SnapshotType {
+  DAILY
+  WEEKLY
+  MONTHLY
+}
+
+model Snapshot {
+  id          String       @id @default(uuid())
+  date        DateTime     @default(now())
+  type        SnapshotType
+
+  // Gesamt-Scores (0-100)
+  seoScore    Float
+  aeoScore    Float
+  geoScore    Float
+  totalScore  Float        // Gewichtet: SEO*0.4 + AEO*0.3 + GEO*0.3
+
+  // SEO-Aggregat
+  avgKeywordPosition  Float?
+  keywordsInTop3      Int      @default(0)
+  keywordsInTop10     Int      @default(0)
+  keywordsTracked     Int      @default(0)
+  pagesIndexed        Int      @default(0)
+  issuesOpen          Int      @default(0)
+  issuesFixed         Int      @default(0)
+  schemaHealth        Float?   // Schema.org Abdeckung in %
+
+  // AEO-Aggregat
+  featuredSnippets    Int      @default(0)
+  aiOverviews         Int      @default(0)
+  faqCoverage         Float?   // % der Seiten mit FAQ
+
+  // GEO-Aggregat
+  llmMentionsTotal    Int      @default(0)
+  llmMentionsPositive Int      @default(0)
+  llmMentionsNeutral  Int      @default(0)
+  llmMentionsNegative Int      @default(0)
+  shareOfVoice        Float?   // vs. Wettbewerb in %
+
+  // Content-Aggregat
+  contentPublished    Int      @default(0)   // kumulativ
+  contentNewThisPeriod Int     @default(0)   // in diesem Zeitraum
+  avgQualityScore     Float?
+
+  // Detail-Daten für Drill-Down
+  keywordDetails      Json?    // [{ keyword, region, position, change }]
+  llmDetails          Json?    // [{ llm, prompt, mentioned, sentiment }]
+  regionScores        Json?    // { "Stuttgart": 78, "Ludwigsburg": 62, ... }
+
+  @@unique([date, type])
+  @@index([date, type])
+  @@index([type])
+}
+
+// ============================================================
+// 8. ALERTS
+// ============================================================
+
+enum AlertType {
+  DROP        // Etwas wird schlechter
+  RISE        // Etwas wird besser
+  MILESTONE   // Meilenstein erreicht
+  SYSTEM      // System-Event
+}
+
+enum AlertSeverity {
+  INFO
+  WARNING
+  CRITICAL
+}
+
+model Alert {
+  id          String        @id @default(uuid())
+  createdAt   DateTime      @default(now())
+  type        AlertType
+  severity    AlertSeverity
+  metric      String        // "keyword_position", "geo_sentiment", "score_total"
+  title       String        // "Schreiner Stuttgart: Pos 3 → 11"
+  message     String        // Detailbeschreibung
+  details     Json?         // { keyword, region, from, to, ... }
+  isRead      Boolean       @default(false)
+  readAt      DateTime?
+  readById    String?
+  readBy      User?         @relation("AlertReader", fields: [readById], references: [id])
+  
+  // Aktion
+  actionType  String?       // "content_refresh", "autofix", "manual"
+  actionTakenAt DateTime?
+
+  @@index([isRead, severity])
+  @@index([createdAt])
+  @@index([type])
+}
+
+// ============================================================
+// 9. JOB QUEUE (für Langläufer)
+// ============================================================
+
+enum JobStatus {
+  QUEUED
+  RUNNING
+  COMPLETED
+  FAILED
+  CANCELLED
+}
+
+model Job {
+  id          String    @id @default(uuid())
+  type        String    // "generate_landingpage", "run_audit", "track_llm", "snapshot"
+  status      JobStatus @default(QUEUED)
+  payload     Json      // Input-Daten
+  result      Json?     // Output-Daten
+  error       String?   // Fehlermeldung bei FAILED
+  progress    Int       @default(0) // 0-100
+  
+  // Tracking
+  createdById String
+  createdBy   User      @relation("JobCreator", fields: [createdById], references: [id])
+  createdAt   DateTime  @default(now())
+  startedAt   DateTime?
+  completedAt DateTime?
+
+  // Skill-Referenz
+  skillSlug   String?   // Welcher Skill hat diesen Job ausgelöst
+
+  @@index([status])
+  @@index([type, status])
+  @@index([createdAt])
+}
+
+// ============================================================
+// 10. ACTIVITY LOG (wer hat was wann gemacht)
+// ============================================================
+
+model Activity {
+  id          String   @id @default(uuid())
+  userId      String?
+  action      String   // "skill_updated", "content_published", "agent_fix", "login"
+  target      String?  // "skill:landingpage", "content:uuid", "issue:uuid"
+  details     Json?    // Zusatzinfos
+  createdAt   DateTime @default(now())
+
+  @@index([userId, createdAt])
+  @@index([action, createdAt])
+  @@index([createdAt])
+}
