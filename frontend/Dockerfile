@@ -1,5 +1,10 @@
 FROM node:20-alpine AS build
 WORKDIR /app
+
+# Build-time API URL (wird vom docker-compose.override.yml gesetzt)
+ARG VITE_API_URL=http://localhost:4000/api
+ENV VITE_API_URL=$VITE_API_URL
+
 COPY package*.json ./
 RUN npm ci
 COPY . .
