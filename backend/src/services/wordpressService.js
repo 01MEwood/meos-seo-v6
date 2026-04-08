@@ -5,156 +5,215 @@ const WP_USER = process.env.WP_USER || 'me_admin_26x';
 const WP_APP_PASSWORD = process.env.WP_APP_PASSWORD || '';
 const WP_TEMPLATE_ID = parseInt(process.env.WP_TEMPLATE_ID || '9741', 10);
 
+const CLONER_BASE = `${WP_URL}/wp-json/helden-cloner/v1`;
+
 /**
- * WordPressService — Published Content auf schreinerhelden.de
- * 
- * Methode: Elementor Template Clone + String Replace
- * Template 9741 = Stuttgart Master-Landingpage
+ * WordPressService — Schreinerhelden.de via Helden-Cloner Plugin (v1)
+ *
+ * Nutzt das WP-Plugin "helden-cloner" statt dem Standard REST API.
+ * Plugin-Endpoints:
+ *   GET  /helden-cloner/v1/health
+ *   GET  /helden-cloner/v1/analyze-template?template_id=9741
+ *   GET  /helden-cloner/v1/content-map
+ *   POST /helden-cloner/v1/create-landing-page
+ *   POST /helden-cloner/v1/update-content/{page_id}
+ *   GET  /helden-cloner/v1/landing-pages
+ *   POST /helden-cloner/v1/flush-cache/{page_id}
+ *   POST /helden-cloner/v1/generate-schema
+ *
+ * Template 9741 = Stuttgart Master-Landingpage (34 content slots).
  */
 export class WordPressService {
   constructor(prisma) {
     this.prisma = prisma;
-    this.authHeader = 'Basic ' + Buffer.from(`${WP_USER}:${WP_APP_PASSWORD}`).toString('base64');
+    this.authHeader =
+      'Basic ' + Buffer.from(`${WP_USER}:${WP_APP_PASSWORD}`).toString('base64');
   }
 
+  // ----------------------------------------------------------------
+  // Low-level HTTP helper
+  // ----------------------------------------------------------------
+  async _request(method, path, body) {
+    const url = path.startsWith('http') ? path : `${CLONER_BASE}${path}`;
+    const opts = {
+      method,
+      headers: {
+        Accept: 'application/json',
+        Authorization: this.authHeader,
+      },
+    };
+    if (body !== undefined) {
+      opts.headers['Content-Type'] = 'application/json';
+      opts.body = JSON.stringify(body);
+    }
+    const res = await fetch(url, opts);
+    const text = await res.text();
+    let data;
+    try {
+      data = text ? JSON.parse(text) : {};
+    } catch {
+      data = { raw: text };
+    }
+    if (!res.ok) {
+      const msg = data?.message || data?.raw || `HTTP ${res.status}`;
+      throw new Error(`Helden-Cloner ${method} ${path} → ${res.status}: ${msg}`);
+    }
+    return data;
+  }
+
+  // ----------------------------------------------------------------
+  // Diagnostics
+  // ----------------------------------------------------------------
+  async health() {
+    return this._request('GET', '/health');
+  }
+
+  async analyzeTemplate(templateId = WP_TEMPLATE_ID) {
+    return this._request('GET', `/analyze-template?template_id=${templateId}`);
+  }
+
+  async getContentMap() {
+    return this._request('GET', '/content-map');
+  }
+
+  async listLandingPages() {
+    return this._request('GET', '/landing-pages');
+  }
+
+  async flushCache(pageId) {
+    return this._request('POST', `/flush-cache/${pageId}`);
+  }
+
+  async generateSchema(payload) {
+    return this._request('POST', '/generate-schema', payload);
+  }
+
+  // ----------------------------------------------------------------
+  // Create / Publish
+  // ----------------------------------------------------------------
   /**
-   * Content als WordPress-Post veröffentlichen
+   * Content → Landing-Page via Helden-Cloner erzeugen und publizieren.
+   *
+   * Erwartet ein Content-Objekt mit mindestens:
+   *   { region, service, title, html?, metadata?: { seo?: { metaTitle, metaDescription } } }
    */
   async publish(contentId) {
     const content = await this.prisma.content.findUnique({
       where: { id: contentId },
     });
-
     if (!content) throw new Error(`Content ${contentId} nicht gefunden`);
-    if (!content.html) throw new Error('Content hat keinen HTML-Inhalt');
+    if (!content.region) throw new Error('Content hat keine Region');
+
+    const payload = this._buildCreatePayload(content);
 
     try {
-      // WordPress-Post erstellen
-      const wpPost = await this.createPost({
-        title: content.title,
-        content: content.html,
-        status: 'publish',
-        slug: this.generateSlug(content),
-        meta: content.metadata?.seo || {},
-      });
+      const result = await this._request('POST', '/create-landing-page', payload);
+      const pageId = result.page_id ?? result.id ?? result.ID;
+      const pageUrl = result.url ?? result.link ?? result.permalink;
 
-      // Content-Datensatz aktualisieren
       await this.prisma.content.update({
         where: { id: contentId },
         data: {
           status: 'PUBLISHED',
-          wpPostId: wpPost.id,
-          wpUrl: wpPost.link,
+          wpPostId: pageId ? String(pageId) : null,
+          wpUrl: pageUrl || null,
           publishedAt: new Date(),
         },
       });
 
-      // Activity loggen
       await this.prisma.activity.create({
         data: {
           action: 'content_published',
           target: `content:${contentId}`,
           details: {
-            wpPostId: wpPost.id,
-            wpUrl: wpPost.link,
+            wpPostId: pageId,
+            wpUrl: pageUrl,
             title: content.title,
+            via: 'helden-cloner/v1',
           },
         },
       });
 
-      logger.info(`WordPress: Published "${content.title}" → ${wpPost.link}`);
-      return wpPost;
+      logger.info(
+        `Helden-Cloner: Published "${content.title}" → ${pageUrl || '(no url returned)'}`
+      );
+      return { id: pageId, link: pageUrl, raw: result };
     } catch (err) {
-      logger.error(`WordPress-Fehler: ${err.message}`);
-      throw new Error(`WordPress Publishing fehlgeschlagen: ${err.message}`);
+      logger.error(`Helden-Cloner Publish-Fehler: ${err.message}`);
+      throw new Error(`Publishing fehlgeschlagen: ${err.message}`);
     }
   }
 
   /**
-   * WordPress REST API: Post erstellen
+   * Bestehende Landing-Page via Plugin aktualisieren.
    */
-  async createPost({ title, content, status = 'draft', slug, meta }) {
-    const body = {
-      title,
-      content,
-      status,
-      slug,
-    };
+  async update(contentId) {
+    const content = await this.prisma.content.findUnique({
+      where: { id: contentId },
+    });
+    if (!content) throw new Error(`Content ${contentId} nicht gefunden`);
+    if (!content.wpPostId) throw new Error('Content hat keine wpPostId');
 
-    // Meta-Daten (Yoast SEO) hinzufügen wenn vorhanden
-    if (meta?.metaTitle || meta?.metaDescription) {
-      body.meta = {};
-      if (meta.metaTitle) body.meta._yoast_wpseo_title = meta.metaTitle;
-      if (meta.metaDescription) body.meta._yoast_wpseo_metadesc = meta.metaDescription;
-    }
+    const payload = this._buildCreatePayload(content);
+    const pageId = content.wpPostId;
 
-    const response = await fetch(`${WP_URL}/wp-json/wp/v2/pages`, {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-        'Authorization': this.authHeader,
-      },
-      body: JSON.stringify(body),
+    const result = await this._request('POST', `/update-content/${pageId}`, payload);
+
+    await this.prisma.content.update({
+      where: { id: contentId },
+      data: { updatedAt: new Date() },
     });
 
-    if (!response.ok) {
-      const error = await response.text();
-      throw new Error(`WP API ${response.status}: ${error}`);
-    }
-
-    return response.json();
+    logger.info(`Helden-Cloner: Updated page ${pageId}`);
+    return result;
   }
 
-  /**
-   * Elementor-Template klonen und Ortsnamen ersetzen
-   */
-  async cloneFromTemplate(region, service) {
-    // 1. Template laden
-    const templateResponse = await fetch(
-      `${WP_URL}/wp-json/wp/v2/pages/${WP_TEMPLATE_ID}`,
-      { headers: { 'Authorization': this.authHeader } }
-    );
-
-    if (!templateResponse.ok) {
-      throw new Error(`Template ${WP_TEMPLATE_ID} nicht gefunden`);
-    }
-
-    const template = await templateResponse.json();
-
-    // 2. String-Replace: Stuttgart → Zielregion
-    let content = template.content?.rendered || '';
-    content = content.replaceAll('Stuttgart', region);
-    if (service) {
-      content = content.replaceAll('Dachschrägenschrank', service);
-    }
-
-    // 3. Elementor-Daten klonen (wenn vorhanden)
-    let elementorData = template.meta?._elementor_data || '';
-    if (elementorData) {
-      elementorData = elementorData.replaceAll('Stuttgart', region);
-      if (service) {
-        elementorData = elementorData.replaceAll('Dachschrägenschrank', service);
-      }
-    }
-
-    return { content, elementorData };
+  // ----------------------------------------------------------------
+  // Payload-Builder
+  // ----------------------------------------------------------------
+  _buildCreatePayload(content) {
+    const seo = content.metadata?.seo || {};
+    return {
+      template_id: WP_TEMPLATE_ID,
+      region: content.region,
+      service: content.service || 'Dachschrägenschrank',
+      title: content.title,
+      slug: this.generateSlug(content),
+      status: 'publish',
+      meta_title: seo.metaTitle || content.title,
+      meta_description: seo.metaDescription || '',
+      content_html: content.html || '',
+      content_overrides: content.metadata?.slots || {},
+      schema: content.metadata?.schema || null,
+    };
   }
 
-  /**
-   * Google Search Console: Indexierung beantragen
-   */
+  // ----------------------------------------------------------------
+  // GSC (Platzhalter — siehe google-site-kit/v1 Namespace als Backup)
+  // ----------------------------------------------------------------
   async requestIndexing(url) {
-    // TODO Iteration 3: GSC API Integration
     logger.info(`Indexierung beantragt: ${url}`);
+    // TODO: GSC Service-Account-Flow sobald GSC_SERVICE_ACCOUNT_JSON gesetzt
   }
 
-  /**
-   * URL-Slug generieren
-   */
+  // ----------------------------------------------------------------
+  // Slug-Helper
+  // ----------------------------------------------------------------
   generateSlug(content) {
+    const norm = (s) =>
+      String(s || '')
+        .toLowerCase()
+        .replace(/ä/g, 'ae')
+        .replace(/ö/g, 'oe')
+        .replace(/ü/g, 'ue')
+        .replace(/ß/g, 'ss')
+        .replace(/[^a-z0-9\s-]/g, '')
+        .trim()
+        .replace(/\s+/g, '-');
+
     const parts = [];
-    if (content.service) parts.push(content.service.toLowerCase().replace(/ä/g, 'ae').replace(/ö/g, 'oe').replace(/ü/g, 'ue').replace(/ß/g, 'ss'));
-    if (content.region) parts.push(content.region.toLowerCase().replace(/ä/g, 'ae').replace(/ö/g, 'oe').replace(/ü/g, 'ue').replace(/ß/g, 'ss'));
-    return parts.join('-').replace(/[^a-z0-9-]/g, '') || 'seite';
+    if (content.service) parts.push(norm(content.service));
+    if (content.region) parts.push(norm(content.region));
+    return parts.filter(Boolean).join('-') || 'seite';
   }
 }
