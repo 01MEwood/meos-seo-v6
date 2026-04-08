@@ -1,0 +1,86 @@
+# ============================================================
+# MEOS:SEO v6.0 — Hostinger Deploy-Compose
+#
+# Dies ist die Datei, die im Hostinger Docker Manager als
+# Stack-Definition hochgeladen wird. Zusammen mit `.env` im
+# gleichen Verzeichnis.
+#
+# Images werden von GitHub Actions nach
+#   mariomeosv40/meos-seo-v6-frontend:latest
+#   mariomeosv40/meos-seo-v6-backend:latest
+# gepusht. `docker compose pull && up -d` zieht sie.
+# ============================================================
+services:
+  db:
+    image: postgres:16-alpine
+    container_name: meos-seo-v6-db
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: ${DB_NAME}
+      POSTGRES_USER: ${DB_USER}
+      POSTGRES_PASSWORD: ${DB_PASSWORD}
+    volumes:
+      - meos-seo-v6-pgdata:/var/lib/postgresql/data
+    networks:
+      - meos-shared
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${DB_USER}"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+  redis:
+    image: redis:7-alpine
+    container_name: meos-seo-v6-redis
+    restart: unless-stopped
+    volumes:
+      - meos-seo-v6-redisdata:/data
+    networks:
+      - meos-shared
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+  backend:
+    image: mariomeosv40/meos-seo-v6-backend:latest
+    container_name: meos-seo-v6-backend
+    restart: unless-stopped
+    env_file:
+      - .env
+    environment:
+      NODE_ENV: production
+      PORT: "4000"
+      DATABASE_URL: postgresql://${DB_USER}:${DB_PASSWORD}@db:5432/${DB_NAME}
+      REDIS_URL: redis://redis:6379
+    networks:
+      - meos-shared
+    depends_on:
+      db:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD-SHELL", "wget -qO- http://localhost:4000/api/health || exit 1"]
+      interval: 30s
+      timeout: 5s
+      retries: 5
+      start_period: 30s
+
+  frontend:
+    image: mariomeosv40/meos-seo-v6-frontend:latest
+    container_name: meos-seo-v6-frontend
+    restart: unless-stopped
+    networks:
+      - meos-shared
+    depends_on:
+      - backend
+
+volumes:
+  meos-seo-v6-pgdata:
+  meos-seo-v6-redisdata:
+
+networks:
+  meos-shared:
+    external: true
